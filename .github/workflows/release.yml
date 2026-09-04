@@ -52,6 +52,48 @@ jobs:
             rust_target: aarch64-pc-windows-msvc
             bundle_path: 'src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe'
             asset_suffix: windows-arm64-setup.exe
+          - name: Linux x86_64 AppImage
+            os: ubuntu-24.04
+            platform: linux
+            rust_target: x86_64-unknown-linux-gnu
+            bundle_type: appimage
+            bundle_path: 'src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage'
+            asset_suffix: linux-x86_64.AppImage
+          - name: Linux x86_64 DEB
+            os: ubuntu-24.04
+            platform: linux
+            rust_target: x86_64-unknown-linux-gnu
+            bundle_type: deb
+            bundle_path: 'src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb'
+            asset_suffix: linux-x86_64.deb
+          - name: Linux x86_64 RPM
+            os: ubuntu-24.04
+            platform: linux
+            rust_target: x86_64-unknown-linux-gnu
+            bundle_type: rpm
+            bundle_path: 'src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm'
+            asset_suffix: linux-x86_64.rpm
+          - name: Linux ARM64 AppImage
+            os: ubuntu-24.04-arm
+            platform: linux
+            rust_target: aarch64-unknown-linux-gnu
+            bundle_type: appimage
+            bundle_path: 'src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/*.AppImage'
+            asset_suffix: linux-arm64.AppImage
+          - name: Linux ARM64 DEB
+            os: ubuntu-24.04-arm
+            platform: linux
+            rust_target: aarch64-unknown-linux-gnu
+            bundle_type: deb
+            bundle_path: 'src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/deb/*.deb'
+            asset_suffix: linux-arm64.deb
+          - name: Linux ARM64 RPM
+            os: ubuntu-24.04-arm
+            platform: linux
+            rust_target: aarch64-unknown-linux-gnu
+            bundle_type: rpm
+            bundle_path: 'src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/rpm/*.rpm'
+            asset_suffix: linux-arm64.rpm
 
     steps:
       - name: Checkout
@@ -74,6 +116,12 @@ jobs:
           toolchain: stable
           target: ${{ matrix.rust_target }}
           components: rustfmt, clippy
+
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Validate release version
         shell: bash
@@ -159,6 +207,10 @@ jobs:
         if: matrix.platform == 'windows'
         run: npm run tauri:build -- --target "${{ matrix.rust_target }}" --bundles nsis
 
+      - name: Build Linux package
+        if: matrix.platform == 'linux'
+        run: npm run tauri:build -- --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundle_type }}"
+
       - name: Normalize architecture-specific artifact name
         shell: bash
         env:
@@ -216,12 +268,18 @@ jobs:
             "release/NerfTrack-${version}-macos-x86_64.dmg"
             "release/NerfTrack-${version}-windows-x64-setup.exe"
             "release/NerfTrack-${version}-windows-arm64-setup.exe"
+            "release/NerfTrack-${version}-linux-x86_64.AppImage"
+            "release/NerfTrack-${version}-linux-x86_64.deb"
+            "release/NerfTrack-${version}-linux-x86_64.rpm"
+            "release/NerfTrack-${version}-linux-arm64.AppImage"
+            "release/NerfTrack-${version}-linux-arm64.deb"
+            "release/NerfTrack-${version}-linux-arm64.rpm"
           )
           for artifact in "${expected[@]}"; do
             test -s "$artifact"
           done
           actual_count="$(find release -maxdepth 1 -type f | wc -l | tr -d ' ')"
-          test "$actual_count" = "4"
+          test "$actual_count" = "10"
 
       - name: Create or update GitHub Release
         env:
@@ -233,6 +291,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" release/* \
               --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
               --title "NerfTrack ${RELEASE_TAG}" \
               --generate-notes
           fi

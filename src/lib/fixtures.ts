@@ -48,7 +48,7 @@ export const demoStatus: AppStatus = {
   },
   codexExecutable: {
     state: 'auto_detected',
-    redactedLocation: 'Detected Codex executable',
+    redactedLocation: 'local path redacted',
     message: 'Auto-detected',
   },
   appServer: {

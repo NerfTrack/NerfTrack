@@ -62,7 +62,7 @@ export function HistoryView({ history, range, onRangeChange }: HistoryViewProps)
         </div>
         <div>
           <span>{t('history.bucket')}</span>
-          <strong>{history.bucket}</strong>
+          <strong>{history.bucket === 'raw' ? t('history.bucketRaw') : history.bucket}</strong>
         </div>
       </div>
       <div className="panel history-table-panel">

@@ -1,7 +1,12 @@
+use std::fs as std_fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
-use std::{fs as std_fs, io::Read};
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::io::Read;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::process::Stdio;
 
 use reqwest::{Client, StatusCode, Url};
 use semver::Version;
@@ -655,6 +660,7 @@ pub fn install_update(app: tauri::AppHandle, path: String) -> Result<InstallUpda
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn file_sha256(path: &Path) -> Result<String, String> {
     let mut file = std_fs::File::open(path)
         .map_err(|_| "could not inspect the installed NerfTrack executable".to_string())?;
@@ -1160,6 +1166,7 @@ fn apply_macos_update(
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn record_update_failure(message: &str) {
     let Ok(directory) = crate::storage::data_directory() else {
         return;

@@ -100,6 +100,7 @@ describe('NerfTrack app shell', () => {
     render(<App />);
     await user.click(await screen.findByRole('button', { name: 'Setup' }));
     expect(screen.getByText('Set up NerfTrack')).toBeInTheDocument();
+    expect(screen.getByText('Location hidden')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retry detection' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Start monitoring' })).not.toBeInTheDocument();
     expect(
@@ -131,11 +132,12 @@ describe('NerfTrack app shell', () => {
     expect(screen.getByRole('heading', { name: 'Codex 每周 API 等值估算' })).toBeInTheDocument();
     expect(screen.getByText('本周已使用')).toBeInTheDocument();
     expect(screen.getByText('稳定的每周 API 等值')).toBeInTheDocument();
-    expect(screen.getByText('已观测令牌成本')).toBeInTheDocument();
+    expect(screen.getByText('已观测 Token 成本')).toBeInTheDocument();
     expect(screen.getByRole('img', { name: /每周 API 等值估算历史图表/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '分享图表' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '设置向导' }));
     expect(screen.getByRole('heading', { name: '设置 NerfTrack' })).toBeInTheDocument();
+    expect(screen.getByText('位置已隐藏')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重试检测' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '仅限本地' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '诊断' }));
@@ -152,6 +154,7 @@ describe('NerfTrack app shell', () => {
     expect(screen.getByText('当前')).toBeInTheDocument();
     expect(screen.getByText('日期')).toBeInTheDocument();
     expect(screen.getByText('状态')).toBeInTheDocument();
+    expect(screen.getByText('记录方式')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '设置' }));
     await user.click(screen.getByRole('button', { name: '再次打开引导页' }));

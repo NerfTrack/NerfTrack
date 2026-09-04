@@ -16,6 +16,7 @@ describe('internationalization', () => {
   it('translates interface text and interpolates values', () => {
     expect(translate('zh-CN', 'nav.settings')).toBe('设置');
     expect(translate('zh-TW', 'common.version', { version: '1.1.4' })).toBe('版本 1.1.4');
+    expect(translate('zh-CN', 'history.bucketRaw')).toBe('逐条记录');
   });
 
   it('translates routine reset reasons and preserves an English fallback', () => {
@@ -28,7 +29,7 @@ describe('internationalization', () => {
 
   it('translates common diagnostic reasons and preserves technical fallbacks', () => {
     expect(formatDiagnosticReason('zh-CN', 'monitoring gap')).toBe('监控中断');
-    expect(formatDiagnosticReason('zh-TW', 'partial final line')).toBe('最後一行不完整');
+    expect(formatDiagnosticReason('zh-TW', 'partial final line')).toBe('記錄仍在寫入');
     expect(
       formatDiagnosticReason(
         'zh-CN',

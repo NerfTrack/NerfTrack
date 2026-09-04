@@ -29,6 +29,12 @@ jobs:
           - name: Windows ARM64 (preview)
             os: windows-11-arm
             experimental: true
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            experimental: false
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            experimental: false
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -44,6 +50,11 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf xdg-utils
       - name: Install frontend dependencies
         run: npm ci
       - name: Frontend gates
@@ -59,7 +70,11 @@ jobs:
           cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
           cargo test --manifest-path src-tauri/Cargo.toml
       - name: Build unsigned app artifacts
+        if: runner.os != 'Linux'
         run: npm run tauri:build
+      - name: Build Linux packages
+        if: runner.os == 'Linux'
+        run: npm run tauri:build -- --bundles appimage,deb,rpm
       - name: Check patch whitespace
         run: git diff --check
       - name: Upload unsigned artifacts

@@ -14,8 +14,9 @@ The supported release targets are:
 
 - macOS ARM64 and Intel x86_64
 - Windows ARM64 and Intel x86_64
+- Linux Intel x86_64 and ARM64 as AppImage, Debian, and RPM packages
 
-Linux packaging and Linux CI are intentionally out of scope for this release. Windows ARM64 is built natively on GitHub's `windows-11-arm` runner, and a release is not published unless that architecture completes successfully.
+Linux automatic update installation is not supported; download a newer Linux package from the GitHub Releases page instead. Windows ARM64 is built natively on GitHub's `windows-11-arm` runner, and a release is not published unless that architecture completes successfully.
 
 ## Build and test
 
@@ -33,16 +34,22 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run build
 ```
 
-Use `npm run tauri:build` for the native unsigned bundle. The macOS helper in `script/build_and_run.sh` is macOS-only.
+Use `npm run tauri:build` for the native unsigned bundle. On Linux, use `npm run tauri:build -- --bundles appimage,deb,rpm` to build all three package formats. The macOS helper in `script/build_and_run.sh` is macOS-only.
 
 ## Releases
 
-Tagged releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) and attach four architecture-specific unsigned installers to the GitHub Release:
+Tagged releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) and attach ten architecture-specific unsigned artifacts to the GitHub Release:
 
 - `NerfTrack-<version>-macos-arm64.dmg`
 - `NerfTrack-<version>-macos-x86_64.dmg`
 - `NerfTrack-<version>-windows-x64-setup.exe`
 - `NerfTrack-<version>-windows-arm64-setup.exe`
+- `NerfTrack-<version>-linux-x86_64.AppImage`
+- `NerfTrack-<version>-linux-x86_64.deb`
+- `NerfTrack-<version>-linux-x86_64.rpm`
+- `NerfTrack-<version>-linux-arm64.AppImage`
+- `NerfTrack-<version>-linux-arm64.deb`
+- `NerfTrack-<version>-linux-arm64.rpm`
 
 The first release is `v0.5.0`. The Windows ARM64 build uses the native `aarch64-pc-windows-msvc` target; Tauri documents that its NSIS bootstrapper may itself run through x86 emulation while installing the native ARM64 application. If any required architecture cannot build, the release job fails instead of attaching a substitute artifact.
 

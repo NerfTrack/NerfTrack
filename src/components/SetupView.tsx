@@ -95,10 +95,12 @@ export function SetupView({
                   : onRetry;
           const isAlert = discovery.state === 'missing' || discovery.state === 'unsupported';
           const discoveryPath =
-            discovery.redactedLocation ??
-            (discovery.state === 'not_required'
-              ? t('setup.notRequired')
-              : t('setup.notDiscovered'));
+            discovery.redactedLocation === 'local path redacted'
+              ? t('discovery.redacted')
+              : (discovery.redactedLocation ??
+                (discovery.state === 'not_required'
+                  ? t('setup.notRequired')
+                  : t('setup.notDiscovered')));
           return (
             <article className="discovery-card" key={card.key}>
               <div className="discovery-title-row">

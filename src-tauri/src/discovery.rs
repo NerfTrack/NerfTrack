@@ -632,7 +632,10 @@ fn macos_app_binary_candidates() -> Vec<PathBuf> {
 }
 
 fn platform_fallback_binary_candidates() -> Vec<PathBuf> {
+    #[cfg(any(target_os = "macos", windows))]
     let mut candidates = Vec::new();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let candidates = Vec::new();
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = home_dir() {
