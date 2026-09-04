@@ -364,6 +364,15 @@ export function HomeView({
         <div className="hero-controls">
           <RangeSelector range={range} onChange={selectRange} />
           <button
+            className={`refresh-button ${isRefreshing ? 'is-refreshing' : ''}`}
+            aria-label={t('home.refresh')}
+            title={t('home.refresh')}
+            disabled={isRefreshing}
+            onClick={onRefresh}
+          >
+            <Icon name="refresh" size={19} />
+          </button>
+          <button
             className="share-graph-hero-button"
             type="button"
             onClick={() => void shareGraph()}
@@ -372,15 +381,6 @@ export function HomeView({
           >
             <Icon name="message" size={17} />
             <span>{isSharing ? t('home.opening') : t('home.shareGraph')}</span>
-          </button>
-          <button
-            className={`refresh-button ${isRefreshing ? 'is-refreshing' : ''}`}
-            aria-label={t('home.refresh')}
-            title={t('home.refresh')}
-            disabled={isRefreshing}
-            onClick={onRefresh}
-          >
-            <Icon name="refresh" size={19} />
           </button>
         </div>
       </header>

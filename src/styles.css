@@ -694,7 +694,9 @@ p {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 18px;
+  margin-left: auto;
   padding-top: 10px;
 }
 .range-control,
@@ -2270,8 +2272,10 @@ p {
 @media (max-width: 1320px) and (min-width: 761px) {
   .hero-heading {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
   }
   .hero-controls {
+    width: 100%;
     padding-top: 0;
   }
   .metric-grid {
@@ -2369,21 +2373,21 @@ p {
   .hero-heading,
   .history-heading {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 20px;
   }
   .hero-controls {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    justify-content: stretch;
+    display: flex;
+    width: 100%;
+    justify-content: flex-end;
     padding-top: 0;
   }
   .range-control {
-    width: 100%;
-    grid-column: 1 / -1;
-    justify-content: space-between;
+    width: auto;
+    flex: 0 1 auto;
   }
   .range-control button {
-    min-width: 0;
+    min-width: 61px;
     flex: 1;
     padding: 0 6px;
   }

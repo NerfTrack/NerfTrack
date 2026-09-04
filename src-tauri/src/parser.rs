@@ -282,11 +282,11 @@ pub fn fast_multiplier_for_model(model: &str, speed_mode: SpeedMode) -> f64 {
         return 1.0;
     }
     let normalized = crate::pricing::canonical_api_model_id(model);
-    if is_model_family(&normalized, "gpt-5.4") {
+    if is_model_family(&normalized, "gpt-5.4") || normalized == "gpt-6-astra" {
         2.0
     } else {
-        // GPT-5.5, GPT-5.6, and explicitly fast unknown/future models all use
-        // the exact 2.5x Fast credit multiplier.
+        // GPT-5.5, GPT-5.6, and explicitly fast unknown/future models use the
+        // exact 2.5x Fast credit multiplier.
         2.5
     }
 }
@@ -1018,6 +1018,7 @@ mod tests {
             ("codex-auto-review", 2.5),
             ("gpt-5.5", 2.5),
             ("gpt-5.6-pro", 2.5),
+            ("gpt-6-astra", 2.0),
             ("gpt-5.7-future", 2.5),
         ] {
             assert_eq!(

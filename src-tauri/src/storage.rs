@@ -82,11 +82,16 @@ struct ApiPrice {
     output: f64,
 }
 
-// Verified 2026-08-20 from OpenAI's official model catalog and pricing pages;
+// Verified 2026-09-04 from OpenAI's official model catalog and pricing pages;
 // see docs/CALCULATION.md for the source links. Rates are USD / 1M text tokens.
 fn official_price(model: &str) -> Option<ApiPrice> {
     let model = pricing::canonical_api_model_id(model);
     match model.as_str() {
+        "gpt-6-astra" => Some(ApiPrice {
+            input: 10.0,
+            cached_input: 1.0,
+            output: 50.0,
+        }),
         "gpt-5.6" | "gpt-5.6-sol" | "chat-latest" => Some(ApiPrice {
             input: 5.0,
             cached_input: 0.5,
@@ -278,7 +283,8 @@ fn event_cost(
     }
     let documented_long_context = canonical_model.starts_with("gpt-5.4")
         || canonical_model.starts_with("gpt-5.5")
-        || canonical_model.starts_with("gpt-5.6");
+        || canonical_model.starts_with("gpt-5.6")
+        || canonical_model == "gpt-6-astra";
     if !has_remote_tiers && long_context && documented_long_context {
         multiplier_input = 2.0;
         multiplier_output = 1.5;
@@ -3927,6 +3933,56 @@ mod tests {
         .expect("official cached price")
         .cost;
         assert!((cached_cost - 0.122).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gpt_6_astra_uses_current_official_rates() {
+        let event = UsageEvent {
+            model: "gpt-6-astra".into(),
+            input_tokens: 100_000,
+            output_tokens: 100_000,
+            ..UsageEvent::default()
+        };
+        let priced = event_cost(&event, &AppSettings::default(), &PricingCatalog::default())
+            .expect("official Astra price");
+        assert_eq!(priced.source, "official");
+        assert_eq!(priced.effective_input_rate, 10.0);
+        assert_eq!(priced.effective_cached_input_rate, 1.0);
+        assert_eq!(priced.effective_output_rate, 50.0);
+        assert!((priced.cost - 6.0).abs() < 1e-12);
+
+        let cached_event = UsageEvent {
+            model: "gpt-6-astra".into(),
+            input_tokens: 100_000,
+            cached_input_tokens: 100_000,
+            output_tokens: 100_000,
+            ..UsageEvent::default()
+        };
+        let cached_cost = event_cost(
+            &cached_event,
+            &AppSettings::default(),
+            &PricingCatalog::default(),
+        )
+        .expect("official Astra cached price")
+        .cost;
+        assert!((cached_cost - 5.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gpt_6_astra_applies_documented_long_context_multipliers() {
+        let event = UsageEvent {
+            model: "gpt-6-astra".into(),
+            input_tokens: 300_000,
+            cached_input_tokens: 100_000,
+            output_tokens: 100_000,
+            ..UsageEvent::default()
+        };
+        let priced = event_cost(&event, &AppSettings::default(), &PricingCatalog::default())
+            .expect("official Astra price");
+        assert_eq!(priced.input_multiplier, 2.0);
+        assert_eq!(priced.output_multiplier, 1.5);
+        assert_eq!(priced.effective_cached_input_rate, 2.0);
+        assert!((priced.cost - 11.7).abs() < 1e-12);
     }
 
     #[test]

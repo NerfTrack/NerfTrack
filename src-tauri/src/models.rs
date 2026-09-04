@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 // existing derived data is invalidated and rebuilt deterministically.
 pub const ALGORITHM_VERSION: &str = "nerftrack-token-api-equivalent-v5";
 /// This is deliberately independent from the SQLite schema and estimator versions.
-pub const PRICING_RULE_VERSION: &str = "models-dev-openai-pricing-v2";
+pub const PRICING_RULE_VERSION: &str = "models-dev-openai-pricing-v3";
 pub const RECONSTRUCTION_VERSION: &str = "weekly-window-reconstruction-v5";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

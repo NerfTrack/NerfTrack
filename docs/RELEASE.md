@@ -6,6 +6,15 @@ Pull-request CI runs the frontend, Rust, and Tauri packaging smoke checks on `ma
 
 Signing and notarization are secret-driven release steps and are not part of pull-request CI. Certificates, API keys, signing identities, generated local databases, and audit snapshots must never be committed or uploaded. NerfTrack's original source code is licensed under GPL-3.0-only; third-party components retain their respective licenses.
 
+## 1.1.6 — 2026-09-04
+
+- Added built-in GPT-6 Astra pricing with input, cached-input, output, long-context, and Fast-mode accounting.
+- Added a pricing-rule revision and regression coverage for Astra estimates, including the pending local-alias path for `gpt-6-astra-aeon`.
+- Reworked the Home graph toolbar so the ranges, Refresh, and Share actions stay together at the far right, with Share last.
+- Added Chinese localization improvements and Linux x86_64/ARM64 AppImage, DEB, and RPM CI/release packaging through PR #9.
+
+Validation: frontend formatting, lint, typecheck, 59 frontend tests, Rust formatting, Clippy, Rust tests, Tauri app build, installation, ad-hoc signing, and installed bundle verification.
+
 ## 1.1.4 — 2026-08-25
 
 - Added a prominent Home-header action for browsing and posting in NerfTrack's Share Your Graph discussion.

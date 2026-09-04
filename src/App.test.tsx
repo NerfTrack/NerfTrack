@@ -83,6 +83,18 @@ describe('NerfTrack app shell', () => {
     expect(await screen.findByText('CLI Mode · 846 usage events observed')).toBeInTheDocument();
   });
 
+  it('keeps refresh beside the ranges and share as the final hero action', async () => {
+    render(<App />);
+    await screen.findByText('Codex Weekly API-equivalent Estimator');
+
+    const rangeTabs = screen.getByRole('tablist', { name: 'History range' });
+    const controls = rangeTabs.parentElement;
+    expect(controls).not.toBeNull();
+    expect(
+      Array.from(controls!.querySelectorAll('button')).map((button) => button.textContent),
+    ).toEqual(['1D', '1W', '1M', '3M', '6M', '', 'Share your graph']);
+  });
+
   it('switches to setup and changes a monitoring control', async () => {
     const user = userEvent.setup();
     render(<App />);

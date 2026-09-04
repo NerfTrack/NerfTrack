@@ -23,7 +23,7 @@ before the first setting remain uncorrected.
 
 The normalized event fields are persisted as `speed_mode`, `speed_source`, and
 `fast_multiplier`. The exact Fast multiplier is 2.0x for the GPT-5.4 family and
-2.5x for GPT-5.5, GPT-5.6, and unknown/future models with explicit Fast
+GPT-6 Astra, and 2.5x for GPT-5.5, GPT-5.6, and unknown/future models with explicit Fast
 evidence. Standard mode and events without explicit Fast evidence use 1.0x.
 The multiplier is applied after the ordinary token-derived API cost is
 calculated and before cost deltas are paired with quota-percentage deltas:
@@ -59,7 +59,9 @@ Pricing precedence is:
 2. A token-priced model in the latest valid models.dev openai.models snapshot.
 3. The embedded OpenAI fallback catalog below.
 
-Built-in fallback rates were verified on 2026-08-20 from OpenAI API model pages:
+Built-in fallback rates were verified on 2026-09-04 from OpenAI API model pages:
+
+- [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra): $10 input, $1 cached input, $50 output per 1M text tokens. Cache writes are $12.50 per 1M tokens. Prompts over 272K input tokens use 2x input/cache rates and 1.5x output; Fast mode is 2x the applicable rates.
 
 - [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna): $0.20 input, $0.02 cached input, $1.20 output per 1M text tokens.
 - [GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra): $2 input, $0.20 cached input, $12 output per 1M text tokens.
@@ -79,6 +81,9 @@ GPT-4o, o1, o3, o3-mini, and o4-mini text model IDs using the [official model ca
 [model comparison](https://developers.openai.com/api/docs/models/compare), and [API pricing](https://openai.com/api/pricing/)
 rates verified on that date. Token logs do not identify audio/image modality tokens, cache writes,
 or tool-call units, so those non-text charges are intentionally unavailable rather than fabricated.
+The official OpenAI model catalog currently documents `gpt-6-astra` but does not publish
+API pricing for the screenshot's `gpt-6-astra-aeon` identifier; NerfTrack leaves that
+identifier pending until an official rate is available or a local override is supplied.
 
 User-provided model overrides are local-only and take precedence over both models.dev and the
 embedded fallback. Each needs a nonempty model ID and finite non-negative input, cached-input,
