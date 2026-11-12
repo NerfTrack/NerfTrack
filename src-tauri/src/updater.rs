@@ -140,6 +140,7 @@ async fn fetch_latest_release(repository_url: &str) -> Result<GithubRelease, Str
     let response = github_client()?
         .get(endpoint)
         .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2026-03-10")
         .send()
         .await
         .map_err(|_| "could not reach GitHub. Check your internet connection".to_string())?;
