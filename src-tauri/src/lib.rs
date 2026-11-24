@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::UNIX_EPOCH;
 
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::models::{
     AccountState, AppSettings, AppStatus, AppStatusState, ConnectionQuality, DataQuality,
@@ -54,7 +54,7 @@ pub struct AppState {
     pub database: Arc<Mutex<storage::Database>>,
     codex_home_override: Mutex<Option<PathBuf>>,
     codex_binary_override: Mutex<Option<PathBuf>>,
-    collection_paused: Mutex<bool>,
+    collection_operation: Arc<Mutex<()>>,
     settings: Arc<Mutex<AppSettings>>,
     background: Arc<Mutex<BackgroundWork>>,
 }
@@ -67,7 +67,7 @@ impl AppState {
             database: Arc::new(Mutex::new(database)),
             codex_home_override: Mutex::new(overrides.codex_home),
             codex_binary_override: Mutex::new(overrides.codex_binary),
-            collection_paused: Mutex::new(false),
+            collection_operation: Arc::new(Mutex::new(())),
             settings: Arc::new(Mutex::new(AppSettings::default())),
             background: Arc::new(Mutex::new(BackgroundWork {
                 phase: BackgroundPhase::Initializing,
@@ -112,10 +112,15 @@ impl AppState {
             .lock()
             .ok()
             .and_then(|path| path.clone());
+        let operation = Arc::clone(&self.collection_operation);
         let spawn_result = thread::Builder::new()
             .name("nerftrack-background-init".into())
             .spawn(move || {
                 let result = (|| {
+                    let _operation = operation
+                        .lock()
+                        .map_err(|_| "collection state is unavailable".to_string())?;
+
                     let historical_home =
                         discovery::discover_codex_home(home_override.as_deref()).0;
                     Self::initialize_background_without_blocking(
@@ -168,14 +173,6 @@ impl AppState {
     }
 
     fn request_background_reconcile(&self) {
-        if self
-            .collection_paused
-            .lock()
-            .map(|paused| *paused)
-            .unwrap_or(true)
-        {
-            return;
-        }
         let home_override = self
             .codex_home_override
             .lock()
@@ -194,10 +191,15 @@ impl AppState {
         work.reconciliation_in_flight = true;
         let database = Arc::clone(&self.database);
         let background = Arc::clone(&self.background);
+        let operation = Arc::clone(&self.collection_operation);
         let spawn_result = thread::Builder::new()
             .name("nerftrack-background-reconcile".into())
             .spawn(move || {
                 let result = (|| {
+                    let _operation = operation
+                        .lock()
+                        .map_err(|_| "collection state is unavailable".to_string())?;
+
                     if reinitialize {
                         let historical_home =
                             discovery::discover_codex_home(home_override.as_deref()).0;
@@ -278,59 +280,69 @@ impl AppState {
         Ok(())
     }
 
-    fn pause_collection(&self) -> Result<(), String> {
-        *self
-            .collection_paused
-            .lock()
-            .map_err(|_| "collection state is unavailable".to_string())? = true;
-        Ok(())
-    }
-
-    fn resume_collection(&self) -> Result<(), String> {
-        *self
-            .collection_paused
-            .lock()
-            .map_err(|_| "collection state is unavailable".to_string())? = false;
-        Ok(())
-    }
-
-    fn baseline_collection_at_current_end(&self) -> Result<(), String> {
-        let home_override = self
+    fn selected_source(&self) -> Result<Option<PathBuf>, String> {
+        let selected = self
             .codex_home_override
             .lock()
             .map_err(|_| "discovery state is unavailable".to_string())?
             .clone();
-        let (home, _) = discovery::discover_codex_home(home_override.as_deref());
-        let Some(home) = home else {
-            return Ok(());
-        };
-        let collection = collector::scan_codex_home_with_state(&home, &Default::default())?;
-        let baseline_events = collection
-            .events
-            .iter()
-            .filter(|event| {
-                event.quota_used_percent.is_some()
-                    && event
-                        .quota_window_minutes
-                        .is_some_and(|minutes| (minutes - 10_080.0).abs() <= 240.0)
-            })
-            .max_by_key(|event| event.timestamp_ms)
-            .cloned()
-            .into_iter()
-            .collect();
-        let checkpoints_only = collector::CollectionSummary {
-            events: baseline_events,
-            checkpoints: collection.checkpoints,
-            ..Default::default()
-        };
+        Ok(discovery::discover_codex_home(selected.as_deref()).0)
+    }
+
+    fn reset_at_current_end(&self) -> Result<(), String> {
+        let _operation = self
+            .collection_operation
+            .lock()
+            .map_err(|_| "collection state is unavailable".to_string())?;
+        let cutoff = now_ms();
+        let mut baseline = collector::CollectionSummary::default();
+        if let Some(home) = self.selected_source()? {
+            let scan = collector::scan_codex_home_with_state(&home, &Default::default())?;
+            if !scan.interrupted_sources.is_empty() {
+                return Err("Codex data scan was incomplete; reset was canceled".into());
+            }
+            let mut latest = std::collections::HashMap::new();
+            for event in scan.events {
+                if event.timestamp_ms > cutoff {
+                    baseline.events.push(event);
+                } else if event.quota_used_percent.is_some() {
+                    let key = (event.account_key.clone(), event.quota_limit_id.clone());
+                    let saved = latest.entry(key).or_insert_with(|| event.clone());
+                    if saved.timestamp_ms <= event.timestamp_ms {
+                        *saved = event;
+                    }
+                }
+            }
+            baseline
+                .events
+                .extend(latest.into_values().map(|mut event| {
+                    event.input_tokens = 0;
+                    event.cached_input_tokens = 0;
+                    event.output_tokens = 0;
+                    event.reasoning_tokens = 0;
+                    event
+                }));
+            baseline.checkpoints = scan.checkpoints;
+        }
         self.database
             .lock()
             .map_err(|_| "database writer is unavailable".to_string())?
-            .persist_collection::<()>(&checkpoints_only, None, None)?;
-        if !collection.interrupted_sources.is_empty() {
-            return Err("Codex data scan completed only partially; see local diagnostics".into());
-        }
-        Ok(())
+            .reset_with_baseline(&baseline, cutoff)
+    }
+
+    fn full_import(&self) -> Result<(), String> {
+        let _operation = self
+            .collection_operation
+            .lock()
+            .map_err(|_| "collection state is unavailable".to_string())?;
+        let home = self
+            .selected_source()?
+            .ok_or("No readable Codex data folder was found")?;
+        let collection = collector::scan_historical_codex_home(&home)?;
+        self.database
+            .lock()
+            .map_err(|_| "database writer is unavailable".to_string())?
+            .reimport(&collection)
     }
 
     fn discover_status(&self, reconciliation_failed: bool) -> AppStatus {
@@ -560,65 +572,49 @@ fn reset_annotations(state: State<'_, AppState>) -> Result<(), String> {
         .reset_annotations()
 }
 
+async fn run_collection_command(
+    app: tauri::AppHandle,
+    command: fn(&AppState) -> Result<(), String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || command(&app.state::<AppState>()))
+        .await
+        .map_err(|_| "local data operation was interrupted".to_string())?
+}
+
 #[tauri::command]
-fn reset_all_data(state: State<'_, AppState>) -> Result<(), String> {
-    state.pause_collection()?;
-    let result = state
-        .database
-        .lock()
-        .map_err(|_| "database writer is unavailable".to_string())?
-        .reset_all_data();
-    if let Err(error) = result {
-        let _ = state.resume_collection();
-        return Err(error);
-    }
-    let baseline_result = state.baseline_collection_at_current_end();
-    let resume_result = state.resume_collection();
-    baseline_result.and(resume_result)
+async fn reset_all_data(app: tauri::AppHandle) -> Result<(), String> {
+    run_collection_command(app, AppState::reset_at_current_end).await
 }
 
 #[tauri::command]
 fn restore_graph_data(state: State<'_, AppState>) -> Result<(), String> {
-    state.resume_collection()?;
     state.request_background_reconcile();
     Ok(())
 }
 
 #[tauri::command]
-fn restore_last_checkpoint(state: State<'_, AppState>) -> Result<(), String> {
-    state.pause_collection()?;
-    let restore_result = state
-        .database
-        .lock()
-        .map_err(|_| "database writer is unavailable".to_string())?
-        .restore_last_reset_checkpoint();
-    if let Err(error) = restore_result {
-        let _ = state.resume_collection();
-        return Err(error);
-    }
-    state.resume_collection()?;
-    // The checkpoint contains the exact pre-reset graph and source offsets. Reconcile once
-    // afterward so activity written to the Codex logs since the reset is retained as well.
-    state.request_background_reconcile();
-    Ok(())
+async fn restore_last_checkpoint(app: tauri::AppHandle) -> Result<(), String> {
+    run_collection_command(app, |state| {
+        {
+            let _operation = state
+                .collection_operation
+                .lock()
+                .map_err(|_| "collection state is unavailable".to_string())?;
+            state
+                .database
+                .lock()
+                .map_err(|_| "database writer is unavailable".to_string())?
+                .restore_last_reset_checkpoint()?;
+        }
+        state.request_background_reconcile();
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]
-fn import_all_data(state: State<'_, AppState>) -> Result<(), String> {
-    state.pause_collection()?;
-    let clear_result = state
-        .database
-        .lock()
-        .map_err(|_| "database writer is unavailable".to_string())?
-        .clear_imported_data();
-    if let Err(error) = clear_result {
-        let _ = state.resume_collection();
-        return Err(error);
-    }
-    state.resume_collection()?;
-    // With all source checkpoints removed, reconciliation reads every available JSONL record.
-    state.request_background_reconcile();
-    Ok(())
+async fn import_all_data(app: tauri::AppHandle) -> Result<(), String> {
+    run_collection_command(app, AppState::full_import).await
 }
 
 #[tauri::command]

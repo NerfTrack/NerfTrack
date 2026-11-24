@@ -10,6 +10,28 @@ const messages = {
   'nav.setup': ['Setup', '设置向导', '設定精靈'],
   'nav.diagnostics': ['Diagnostics', '诊断', '診斷'],
   'nav.history': ['History', '历史记录', '歷史記錄'],
+  'releaseNotes.title': ['What’s new in v{version}', 'v{version} 更新内容', 'v{version} 更新內容'],
+  'releaseNotes.estimates': [
+    'Weekly estimates now check pricing coverage, account identity, and quota resets before reporting confidence.',
+    '每周估算会检查价格覆盖范围、账户和额度重置后再显示置信度。',
+    '每週估算會檢查價格涵蓋範圍、帳戶和額度重設後再顯示信賴度。',
+  ],
+  'releaseNotes.history': [
+    'Reimport and reset preserve local history when a scan fails. Duplicate token readings are handled more reliably.',
+    '扫描失败时，重新导入和重置会保留本地历史。重复的令牌读数也能更可靠地处理。',
+    '掃描失敗時，重新匯入和重設會保留本機歷史。重複的權杖讀數也能更可靠地處理。',
+  ],
+  'releaseNotes.upgrade': [
+    'On upgrade, NerfTrack recalculates saved estimates and repairs token counts from the original logs it can still read.',
+    '升级后，NerfTrack 会重新计算已保存的估算，并根据仍可读取的原始日志修复令牌计数。',
+    '升級後，NerfTrack 會重新計算已儲存的估算，並根據仍可讀取的原始日誌修正權杖計數。',
+  ],
+  'releaseNotes.updates': [
+    'Release notes are available in Settings, and update checks use the documented GitHub API version.',
+    '可以在设置中查看更新说明。更新检查使用明确指定的 GitHub API 版本。',
+    '可以在設定中檢視更新說明。更新檢查使用明確指定的 GitHub API 版本。',
+  ],
+  'releaseNotes.dismiss': ['Dismiss', '关闭', '關閉'],
   'nav.settings': ['Settings', '设置', '設定'],
   'common.version': ['Version {version}', '版本 {version}', '版本 {version}'],
   'settings.title': ['Settings', '设置', '設定'],
@@ -268,9 +290,9 @@ const messages = {
   'settings.restoreLast': ['Restore last checkpoint', '恢复上一个检查点', '還原上一個檢查點'],
   'settings.importAll': ['Import all data', '导入所有数据', '匯入所有資料'],
   'settings.importDescription': [
-    'Clear the import index and re-read every available Codex log from the beginning. Best for a complete rebuild; may take longer.',
-    '清除导入索引，并从头重新读取所有可用的 Codex 日志。适合完整重建，但可能需要更长时间。',
-    '清除匯入索引，並從頭重新讀取所有可用的 Codex 日誌。適合完整重建，但可能需要較長時間。',
+    'Re-read available Codex logs and rebuild estimates while keeping usage already saved from older logs.',
+    '重新读取可用的 Codex 日志并重建估算，同时保留已保存的旧日志用量。',
+    '重新讀取可用的 Codex 日誌並重建估算，同時保留已儲存的舊日誌用量。',
   ],
   'settings.importing': ['Importing all data…', '正在导入所有数据…', '正在匯入所有資料…'],
   'settings.confirmResetTitle': [

@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 
 // This persisted identifier changes when token-accounting semantics change so
 // existing derived data is invalidated and rebuilt deterministically.
-pub const ALGORITHM_VERSION: &str = "nerftrack-token-api-equivalent-v5";
+pub const ALGORITHM_VERSION: &str = "nerftrack-token-api-equivalent-v6";
 /// This is deliberately independent from the SQLite schema and estimator versions.
 pub const PRICING_RULE_VERSION: &str = "models-dev-openai-pricing-v4";
-pub const RECONSTRUCTION_VERSION: &str = "weekly-window-reconstruction-v5";
+pub const RECONSTRUCTION_VERSION: &str = "weekly-window-reconstruction-v6";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -310,6 +310,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub starter_page_seen: bool,
     #[serde(default)]
+    pub last_seen_release_notes_version: String,
+    #[serde(default)]
     pub installation_marker: String,
     #[serde(default)]
     pub custom_pricing: Vec<CustomPriceOverride>,
@@ -359,6 +361,7 @@ impl Default for AppSettings {
             telemetry: false,
             auto_updater: false,
             starter_page_seen: false,
+            last_seen_release_notes_version: String::new(),
             installation_marker: String::new(),
             custom_pricing: Vec::new(),
         }

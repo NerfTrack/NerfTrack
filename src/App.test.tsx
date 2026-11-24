@@ -272,7 +272,7 @@ describe('NerfTrack app shell', () => {
     expect(screen.getByRole('button', { name: 'Restore last checkpoint' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Import all data' })).toBeInTheDocument();
     expect(screen.getByText(/fastest recovery option/i)).toBeInTheDocument();
-    expect(screen.getByText(/re-read every available Codex log/i)).toBeInTheDocument();
+    expect(screen.getByText(/re-read available Codex logs/i)).toBeInTheDocument();
   });
 
   it('edits and validates a local custom pricing override', async () => {

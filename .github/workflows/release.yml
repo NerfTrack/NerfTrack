@@ -99,6 +99,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           # The release build uses the Rust parser in this repository and does
           # not need the documentation-only ccusage submodule. Avoid making
           # installers depend on an unrelated submodule checkout.
@@ -251,6 +252,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out release notes
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
       - name: Download all architecture artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -289,9 +295,13 @@ jobs:
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
           else
+            notes=(--generate-notes)
+            if [[ -f "docs/releases/${RELEASE_TAG}.md" ]]; then
+              notes=(--notes-file "docs/releases/${RELEASE_TAG}.md")
+            fi
             gh release create "$RELEASE_TAG" release/* \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
+              --verify-tag \
               --title "NerfTrack ${RELEASE_TAG}" \
-              --generate-notes
+              "${notes[@]}"
           fi

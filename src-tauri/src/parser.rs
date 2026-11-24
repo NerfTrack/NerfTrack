@@ -69,6 +69,7 @@ pub struct UsageEvent {
     pub request_id: Option<String>,
     pub turn_id: Option<String>,
     pub session_id: Option<String>,
+    pub account_key: Option<String>,
     pub explicit_provider: Option<String>,
     pub explicit_backend: Option<String>,
     pub authenticated_official_codex: bool,
@@ -97,6 +98,7 @@ impl Default for UsageEvent {
             request_id: None,
             turn_id: None,
             session_id: None,
+            account_key: None,
             explicit_provider: None,
             explicit_backend: None,
             authenticated_official_codex: false,
@@ -132,9 +134,15 @@ pub struct ParserState {
     #[serde(default)]
     pub service_tiers: BTreeMap<String, SpeedMode>,
     pub cumulative: BTreeMap<String, CumulativeTotals>,
+    #[serde(default)]
+    pub cumulative_timestamps: BTreeMap<String, i64>,
+    #[serde(default)]
+    pub active_account_key: Option<String>,
+    #[serde(default)]
+    pub source_signature: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CumulativeTotals {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
@@ -420,6 +428,21 @@ pub fn parse_jsonl_line_with_state(
     line: &str,
     state: &mut ParserState,
 ) -> Result<Option<UsageEvent>, String> {
+    parse_jsonl_line_for_version(line, state, false)
+}
+
+pub(crate) fn parse_legacy_jsonl_line(line: &str, state: &mut ParserState) -> Option<UsageEvent> {
+    parse_jsonl_line_for_version(line, state, true)
+        .ok()
+        .flatten()
+}
+
+// The legacy path identifies the exact rows emitted by v1.1.7 during an upgrade reparse.
+fn parse_jsonl_line_for_version(
+    line: &str,
+    state: &mut ParserState,
+    legacy: bool,
+) -> Result<Option<UsageEvent>, String> {
     let value: Value = serde_json::from_str(line).map_err(|_| "invalid JSON record".to_string())?;
     let kind = string_at(&value, &[&["type"], &["event_type"], &["kind"]])
         .unwrap_or_default()
@@ -452,6 +475,19 @@ pub fn parse_jsonl_line_with_state(
             &["payload", "turn_context", "model"],
         ],
     );
+    let model_from_record = if legacy {
+        model_from_record
+    } else {
+        model_from_record.or_else(|| {
+            string_at(
+                &value,
+                &[
+                    &["payload", "info", "model"],
+                    &["payload", "info", "model_name"],
+                ],
+            )
+        })
+    };
     let provider_from_record = string_at(
         &value,
         &[
@@ -507,6 +543,21 @@ pub fn parse_jsonl_line_with_state(
             &["payload", "turn", "id"],
         ],
     );
+    if let Some(account_id) = string_at(
+        &value,
+        &[
+            &["account_id"],
+            &["accountId"],
+            &["payload", "account_id"],
+            &["payload", "accountId"],
+            &["payload", "rate_limits", "account_id"],
+        ],
+    )
+    .filter(|id| !id.trim().is_empty())
+    {
+        state.active_account_key = Some(opaque_identifier(account_id.trim()));
+    }
+    let timestamp = timestamp_ms(&value);
     if let Some(model) = model_from_record.clone() {
         state.active_model = Some(model);
     }
@@ -571,19 +622,39 @@ pub fn parse_jsonl_line_with_state(
             .map(opaque_identifier)
             .or_else(|| state.active_session_id.clone())
             .unwrap_or_else(|| "global".into());
-        let previous = state.cumulative.get(&key).copied().unwrap_or_default();
-        if cumulative {
+        let totals = token_totals(total_token_usage.unwrap_or(usage));
+        let previous = state.cumulative.get(&key).copied();
+        if !legacy
+            && state
+                .cumulative_timestamps
+                .get(&key)
+                .is_some_and(|last| timestamp < *last)
+        {
+            return Ok(None);
+        }
+        if !legacy && previous == Some(totals) {
+            input_tokens = 0;
+            cached_input_tokens = 0;
+            output_tokens = 0;
+            reasoning_tokens = 0;
+        } else if cumulative {
+            let previous = previous
+                .filter(|prior| {
+                    legacy
+                        || (totals.input_tokens >= prior.input_tokens
+                            && totals.output_tokens >= prior.output_tokens)
+                })
+                .unwrap_or_default();
             input_tokens = input_tokens.saturating_sub(previous.input_tokens);
             cached_input_tokens = cached_input_tokens.saturating_sub(previous.cached_input_tokens);
             output_tokens = output_tokens.saturating_sub(previous.output_tokens);
             reasoning_tokens = reasoning_tokens.saturating_sub(previous.reasoning_tokens);
         }
-        state
-            .cumulative
-            .insert(key, token_totals(total_token_usage.unwrap_or(usage)));
+        state.cumulative_timestamps.insert(key.clone(), timestamp);
+        state.cumulative.insert(key, totals);
     }
-    if input_tokens == 0 && output_tokens == 0 && reasoning_tokens == 0 {
-        return Err("record has no token measurement".into());
+    if !legacy {
+        cached_input_tokens = cached_input_tokens.min(input_tokens);
     }
     let provider = provider_from_record.or_else(|| state.active_provider.clone());
     let backend = backend_from_record.or_else(|| state.active_backend.clone());
@@ -610,6 +681,13 @@ pub fn parse_jsonl_line_with_state(
         });
     let quota_window_minutes =
         finite_f64(weekly_limit.and_then(|window| window.get("window_minutes")));
+    if input_tokens == 0
+        && output_tokens == 0
+        && reasoning_tokens == 0
+        && (legacy || quota_used_percent.is_none())
+    {
+        return Err("record has no token measurement".into());
+    }
     let plan = rate_limits.and_then(|limits| string_at(limits, &[&["plan_type"], &["plan"]]));
     let trusted_codex_credit_record = quota_limit_id
         .as_deref()
@@ -637,7 +715,12 @@ pub fn parse_jsonl_line_with_state(
     let fast_multiplier = fast_multiplier_for_model(&model, speed_mode);
     let long_context = bool_at(&value, &[&["long_context"], &["payload", "long_context"]]);
     Ok(Some(UsageEvent {
-        timestamp_ms: timestamp_ms(&value),
+        timestamp_ms: timestamp,
+        account_key: if legacy {
+            None
+        } else {
+            state.active_account_key.clone()
+        },
         model,
         input_tokens,
         cached_input_tokens,
@@ -685,6 +768,14 @@ pub fn parse_jsonl_line_with_state(
 }
 
 pub fn event_fingerprint(event: &UsageEvent) -> String {
+    let legacy = legacy_event_fingerprint(event);
+    match event.account_key.as_deref() {
+        Some(account) => format!("{legacy}:{account}"),
+        None => legacy,
+    }
+}
+
+pub(crate) fn legacy_event_fingerprint(event: &UsageEvent) -> String {
     let mut digest = Sha256::new();
     digest.update(b"nerftrack-event:");
     digest.update(event.request_id.as_deref().unwrap_or("").as_bytes());

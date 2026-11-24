@@ -72,7 +72,16 @@ pub fn median_recent(values: &[f64], sample_count: usize) -> Option<f64> {
         return None;
     }
     recent.sort_by(f64::total_cmp);
-    Some(recent[recent.len() / 2])
+    Some(median_sorted(&recent))
+}
+
+fn median_sorted(values: &[f64]) -> f64 {
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        values[middle - 1] / 2.0 + values[middle] / 2.0
+    } else {
+        values[middle]
+    }
 }
 
 pub fn relative_median_deviation(values: &[f64], sample_count: usize) -> Option<f64> {
@@ -89,7 +98,7 @@ pub fn relative_median_deviation(values: &[f64], sample_count: usize) -> Option<
         return None;
     }
     deviations.sort_by(f64::total_cmp);
-    Some(deviations[deviations.len() / 2] / median)
+    Some(median_sorted(&deviations) / median)
 }
 
 pub fn confidence(

@@ -2557,3 +2557,21 @@ p {
     animation-iteration-count: 1 !important;
   }
 }
+
+.release-notes {
+  margin-block-end: 1rem;
+  padding: 1rem 1.25rem;
+}
+
+.release-notes h2 {
+  margin: 0;
+}
+
+.release-notes summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.release-notes li + li {
+  margin-block-start: 0.4rem;
+}

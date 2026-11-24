@@ -13,7 +13,8 @@ use crate::models::{
     ALGORITHM_VERSION, PRICING_RULE_VERSION, RECONSTRUCTION_VERSION,
 };
 use crate::parser::{
-    event_fingerprint, fast_multiplier_for_model, SpeedMode, SpeedSource, UsageEvent,
+    event_fingerprint, fast_multiplier_for_model, legacy_event_fingerprint, SpeedMode, SpeedSource,
+    UsageEvent,
 };
 use crate::pricing::{self, PricingCatalog};
 
@@ -24,7 +25,6 @@ const RESET_TIMESTAMP_JITTER_MS: i64 = 5 * 60 * 1_000;
 const CLEAR_IMPORTED_DATA_SQL: &str = "
     DELETE FROM source_checkpoints;
     DELETE FROM usage_events;
-    DELETE FROM pricing_snapshots;
     DELETE FROM quota_snapshots;
     DELETE FROM measurements;
     DELETE FROM epochs;
@@ -66,7 +66,6 @@ const RESTORE_RESET_CHECKPOINT_SQL: &str = "
     INSERT INTO accounts SELECT * FROM reset_checkpoint_accounts;
     INSERT INTO source_checkpoints SELECT * FROM reset_checkpoint_source_checkpoints;
     INSERT INTO usage_events SELECT * FROM reset_checkpoint_usage_events;
-    INSERT INTO pricing_snapshots SELECT * FROM reset_checkpoint_pricing_snapshots;
     INSERT INTO quota_snapshots SELECT * FROM reset_checkpoint_quota_snapshots;
     INSERT INTO epochs SELECT * FROM reset_checkpoint_epochs;
     INSERT INTO measurements SELECT * FROM reset_checkpoint_measurements;
@@ -494,7 +493,13 @@ impl Database {
                 connection,
                 remote_pricing: PricingCatalog::default(),
             },
-            Err(_) if path.exists() => {
+            Err(rusqlite::Error::SqliteFailure(error, _))
+                if path.exists()
+                    && matches!(
+                        error.code,
+                        rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                    ) =>
+            {
                 preserve_database_files(&path)?;
                 Self {
                     path: path.clone(),
@@ -505,17 +510,7 @@ impl Database {
             }
             Err(error) => return Err(format!("unable to open local database: {error}")),
         };
-        if database.migrate().is_err() {
-            drop(database);
-            preserve_database_files(&path)?;
-            database = Self {
-                path: path.clone(),
-                connection: open_connection(&path)
-                    .map_err(|_| "unable to create clean local database".to_string())?,
-                remote_pricing: PricingCatalog::default(),
-            };
-            database.migrate()?;
-        }
+        database.migrate()?;
         // Load the last valid catalog for immediate fallback pricing, but defer
         // repricing and graph reconstruction until after the Tauri window exists.
         // A large existing database must not block app startup on any platform.
@@ -1329,6 +1324,33 @@ impl Database {
         account_key: Option<&str>,
         _unused_pricing_snapshot: Option<&P>,
     ) -> Result<usize, String> {
+        self.write_collection(collection, account_key, None)
+    }
+
+    pub(crate) fn reimport(&mut self, collection: &CollectionSummary) -> Result<(), String> {
+        if collection.events.is_empty() || !collection.interrupted_sources.is_empty() {
+            return Err(
+                "no complete Codex data was available to rebuild the current import".into(),
+            );
+        }
+        self.rebuild_from_collection(Some(collection), true)
+    }
+
+    pub(crate) fn reset_with_baseline(
+        &mut self,
+        collection: &CollectionSummary,
+        cutoff: i64,
+    ) -> Result<(), String> {
+        self.write_collection(collection, None, Some(cutoff))
+            .map(|_| ())
+    }
+
+    fn write_collection(
+        &mut self,
+        collection: &CollectionSummary,
+        account_key: Option<&str>,
+        reset_cutoff: Option<i64>,
+    ) -> Result<usize, String> {
         let settings = self.load_settings()?;
         let remote_pricing = self.remote_pricing.clone();
         let pricing_digest = pricing_configuration_digest(&settings, &remote_pricing)?;
@@ -1336,6 +1358,14 @@ impl Database {
             .connection
             .transaction()
             .map_err(|_| "unable to start collection transaction".to_string())?;
+        let old_cutoff = Self::read_reset_cutoff(&transaction)?;
+        if reset_cutoff.is_some() {
+            Self::prepare_reset(&transaction)?;
+            transaction
+                .execute_batch(CLEAR_IMPORTED_DATA_SQL)
+                .map_err(|_| "unable to clear the existing import index".to_string())?;
+            Self::write_reset_cutoff(&transaction, reset_cutoff)?;
+        }
         for checkpoint in &collection.checkpoints {
             transaction
                 .prepare_cached(
@@ -1362,6 +1392,11 @@ impl Database {
         let mut inserted = 0;
         let mut earliest_inserted_at_ms = None;
         for event in &collection.events {
+            if reset_cutoff.is_none()
+                && old_cutoff.is_some_and(|cutoff| event.timestamp_ms <= cutoff)
+            {
+                continue;
+            }
             if Self::persist_event(
                 &transaction,
                 event,
@@ -1423,6 +1458,18 @@ impl Database {
         let Some(active_window_id) = self.active_window_id(&latest)? else {
             return Ok(());
         };
+        let (start, reset, _) = self.active_window_metadata(active_window_id)?;
+        if reset.is_some_and(|reset| reset <= timestamp_ms)
+            || Self::unpriced_in_window(
+                &self.connection,
+                latest.account_key.as_deref(),
+                latest.limit_id.as_deref(),
+                start,
+                latest.observed_at_ms,
+            )?
+        {
+            return Ok(());
+        }
         let points = self.stored_points()?;
         let Some(source) = points.iter().rev().find(|stored| {
             stored.window_id == active_window_id
@@ -1485,6 +1532,18 @@ impl Database {
         remote_pricing: &PricingCatalog,
         pricing_digest: &str,
     ) -> Result<bool, String> {
+        let account_key = event.account_key.as_deref().or(account_key);
+        if let Some(key) = account_key {
+            transaction.execute(
+                "INSERT OR IGNORE INTO accounts (account_key, plan, created_at_ms, last_seen_at_ms)
+                 VALUES (?1, ?2, ?3, ?3)", params![key, event.plan, event.timestamp_ms],
+            ).map_err(|_| "unable to persist account scope".to_string())?;
+        }
+        let has_tokens =
+            event.input_tokens > 0 || event.output_tokens > 0 || event.reasoning_tokens > 0;
+        if !has_tokens {
+            return Self::persist_quota(transaction, event, account_key);
+        }
         let speed_mode = effective_speed_mode(event);
         let speed_source = if speed_mode != SpeedMode::Unknown
             && event.speed_source == SpeedSource::RolloutSetting
@@ -1565,39 +1624,47 @@ impl Database {
                 ])
             })
             .map_err(|_| "unable to persist usage event".to_string())?;
-        if inserted == 1 {
-            if let (Some(used_percent), Some(duration_minutes)) =
-                (event.quota_used_percent, event.quota_window_minutes)
-            {
-                if used_percent.is_finite()
-                    && (0.0..=100.0).contains(&used_percent)
-                    && duration_minutes.is_finite()
-                    && (duration_minutes - WEEKLY_WINDOW_MINUTES).abs()
-                        <= WEEKLY_WINDOW_TOLERANCE_MINUTES
-                {
-                    transaction
-                        .prepare_cached(
-                            "INSERT OR IGNORE INTO quota_snapshots (
-                                account_key, observed_at_ms, reset_at_ms, duration_minutes,
-                                limit_id, plan, used_percent, connection_quality
-                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'good')",
-                        )
-                        .and_then(|mut statement| {
-                            statement.execute(params![
-                                account_key,
-                                event.timestamp_ms,
-                                event.quota_reset_at_ms,
-                                duration_minutes,
-                                event.quota_limit_id,
-                                event.plan,
-                                used_percent
-                            ])
-                        })
-                        .map_err(|_| "unable to persist weekly observation".to_string())?;
-                }
-            }
+        let quota_inserted = Self::persist_quota(transaction, event, account_key)?;
+        Ok(inserted == 1 || quota_inserted)
+    }
+
+    fn persist_quota(
+        transaction: &Transaction<'_>,
+        event: &UsageEvent,
+        account_key: Option<&str>,
+    ) -> Result<bool, String> {
+        let (Some(used_percent), Some(duration)) =
+            (event.quota_used_percent, event.quota_window_minutes)
+        else {
+            return Ok(false);
+        };
+        if !(0.0..=100.0).contains(&used_percent)
+            || !(duration - WEEKLY_WINDOW_MINUTES)
+                .abs()
+                .le(&WEEKLY_WINDOW_TOLERANCE_MINUTES)
+        {
+            return Ok(false);
         }
-        Ok(inserted == 1)
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO quota_snapshots (
+                account_key, observed_at_ms, reset_at_ms, duration_minutes, limit_id,
+                plan, used_percent, connection_quality
+             ) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'good'
+             WHERE NOT EXISTS (SELECT 1 FROM quota_snapshots WHERE account_key IS ?1 AND
+                 observed_at_ms=?2 AND reset_at_ms IS ?3 AND limit_id IS ?5 AND used_percent=?7)",
+                params![
+                    account_key,
+                    event.timestamp_ms,
+                    event.quota_reset_at_ms,
+                    duration,
+                    event.quota_limit_id,
+                    event.plan,
+                    used_percent
+                ],
+            )
+            .map(|count| count > 0)
+            .map_err(|_| "unable to persist weekly observation".to_string())
     }
 
     /// Reparse every discoverable rollout before rebuilding all derived data.
@@ -1611,7 +1678,7 @@ impl Database {
         historical_home: Option<&Path>,
     ) -> Result<(), String> {
         let collection = if let Some(home) = historical_home {
-            let collection = crate::collector::scan_codex_home_with_state(home, &HashMap::new())?;
+            let collection = crate::collector::scan_historical_codex_home(home)?;
             if !collection.interrupted_sources.is_empty() {
                 return Err(
                     "Codex data scan was incomplete; historical graph rebuild was not committed"
@@ -1622,6 +1689,14 @@ impl Database {
         } else {
             None
         };
+        self.rebuild_from_collection(collection.as_ref(), false)
+    }
+
+    fn rebuild_from_collection(
+        &mut self,
+        collection: Option<&CollectionSummary>,
+        include_pre_reset_events: bool,
+    ) -> Result<(), String> {
         let settings = self.load_settings()?;
         let remote_pricing = self.remote_pricing.clone();
         let pricing_digest = pricing_configuration_digest(&settings, &remote_pricing)?;
@@ -1630,7 +1705,10 @@ impl Database {
             .transaction()
             .map_err(|_| "unable to start token estimate rebuild".to_string())?;
 
-        if let Some(collection) = collection.as_ref() {
+        if include_pre_reset_events {
+            Self::write_reset_cutoff(&transaction, None)?;
+        }
+        if let Some(collection) = collection {
             for checkpoint in &collection.checkpoints {
                 transaction
                     .execute(
@@ -1652,13 +1730,37 @@ impl Database {
                     )
                     .map_err(|_| "unable to persist historical source checkpoint".to_string())?;
             }
+            let cutoff = Self::read_reset_cutoff(&transaction)?;
             for event in &collection.events {
+                if cutoff.is_some_and(|cutoff| event.timestamp_ms <= cutoff) {
+                    continue;
+                }
                 let fingerprint = event_fingerprint(event);
-                let already_indexed: bool = transaction
+                if let Some(account_key) = event.account_key.as_deref() {
+                    transaction.execute(
+                        "INSERT OR IGNORE INTO accounts (account_key, plan, created_at_ms, last_seen_at_ms)
+                         VALUES (?1, ?2, ?3, ?3)", params![account_key, event.plan, event.timestamp_ms],
+                    ).map_err(|_| "unable to restore account scope".to_string())?;
+                    transaction
+                        .execute(
+                            "UPDATE usage_events SET account_key=?1, fingerprint=?3
+                           WHERE fingerprint=?2 AND account_key IS NULL AND NOT EXISTS (
+                               SELECT 1 FROM usage_events WHERE fingerprint=?3
+                           )",
+                            params![account_key, legacy_event_fingerprint(event), fingerprint],
+                        )
+                        .map_err(|_| "unable to migrate usage account".to_string())?;
+                    transaction.execute(
+                        "DELETE FROM quota_snapshots WHERE account_key IS NULL AND observed_at_ms=?1
+                           AND limit_id IS ?2 AND reset_at_ms IS ?3 AND used_percent IS ?4",
+                        params![event.timestamp_ms, event.quota_limit_id, event.quota_reset_at_ms, event.quota_used_percent],
+                    ).map_err(|_| "unable to migrate quota account".to_string())?;
+                }
+                let already_indexed = transaction
                     .query_row(
                         "SELECT EXISTS(SELECT 1 FROM usage_events WHERE fingerprint=?1)",
                         params![fingerprint],
-                        |row| row.get(0),
+                        |row| row.get::<_, bool>(0),
                     )
                     .map_err(|_| "unable to inspect historical usage event".to_string())?;
                 if !already_indexed {
@@ -1670,10 +1772,22 @@ impl Database {
                         &remote_pricing,
                         &pricing_digest,
                     )?;
+                } else {
+                    Self::persist_quota(&transaction, event, event.account_key.as_deref())?;
                 }
                 if event.speed_source == SpeedSource::RolloutSetting {
                     Self::update_explicit_speed(&transaction, event)?;
                 }
+            }
+            let mut remove_superseded = transaction
+                .prepare_cached(
+                    "DELETE FROM usage_events WHERE fingerprint=?1 AND account_key IS NULL",
+                )
+                .map_err(|_| "unable to prepare historical token corrections".to_string())?;
+            for fingerprint in &collection.superseded_fingerprints {
+                remove_superseded.execute([fingerprint]).map_err(|_| {
+                    "unable to remove superseded historical token usage".to_string()
+                })?;
             }
             if collection.stats.partial_line_retries > 0 {
                 add_diagnostic(
@@ -2030,26 +2144,23 @@ impl Database {
                 let previous = group.points.last()?;
                 let usage_regressed = current.used_percent
                     < previous.used_percent - crate::estimator::MATERIAL_USAGE_DECREASE_PERCENT;
-                if !usage_regressed {
-                    return None;
-                }
-                // A reset timestamp can move by several hours when the provider
-                // recalculates the weekly window.  Once that change is paired with
-                // a material usage decrease, it is stronger evidence than the old
-                // schedule and must start a new graph window.
                 let reset_changed = match (group.reset_at_ms, current.reset_at_ms) {
                     (Some(previous_reset), Some(next_reset)) => {
                         previous_reset.abs_diff(next_reset) > RESET_TIMESTAMP_JITTER_MS as u64
                     }
-                    (Some(_), None) | (None, Some(_)) => true,
-                    (None, None) => false,
+                    _ => false,
                 };
-                if reset_changed {
+                let crossed_schedule = group.reset_at_ms.is_some_and(|reset| {
+                    previous.observed_at_ms < reset && current.observed_at_ms >= reset
+                });
+                if reset_changed && (crossed_schedule || usage_regressed) {
                     return Some("reported_reset_changed");
                 }
-                if group.reset_at_ms.is_some_and(|reset| {
-                    current.observed_at_ms >= reset - RESET_TIMESTAMP_JITTER_MS
-                }) {
+                if usage_regressed
+                    && group.reset_at_ms.is_some_and(|reset| {
+                        current.observed_at_ms >= reset - RESET_TIMESTAMP_JITTER_MS
+                    })
+                {
                     return Some("scheduled_reset");
                 }
                 None
@@ -2111,6 +2222,7 @@ impl Database {
         )?;
         let mut previous_cost = baseline_cost;
         let mut rates = Vec::new();
+        let mut paired_coverage = 0.0;
         for current in group.points.iter().skip(1) {
             let current_cost = Self::cost_through(
                 transaction,
@@ -2124,7 +2236,14 @@ impl Database {
                 previous_used_percent: previous.used_percent,
                 current_used_percent: current.used_percent,
             };
-            let decision = crate::estimator::measure_interval(interval);
+            let decision = if Self::has_unpriced_usage(transaction, group, current.observed_at_ms)?
+            {
+                crate::estimator::MeasurementDecision::Pending(
+                    "usage in this window has no usable price".into(),
+                )
+            } else {
+                crate::estimator::measure_interval(interval)
+            };
             match decision {
                 crate::estimator::MeasurementDecision::Valid {
                     cost_delta_usd,
@@ -2150,7 +2269,8 @@ impl Database {
                         crate::estimator::MEDIAN_SAMPLE_COUNT,
                     )
                     .expect("valid rate");
-                    let coverage = (current.used_percent - first.used_percent).max(0.0);
+                    paired_coverage += percent_delta;
+                    let coverage = paired_coverage;
                     let relative_deviation = crate::estimator::relative_median_deviation(
                         &rates,
                         crate::estimator::MEDIAN_SAMPLE_COUNT,
@@ -2245,8 +2365,10 @@ impl Database {
                     )?;
                 }
             }
-            previous = current.clone();
-            previous_cost = current_cost;
+            if current.used_percent != previous.used_percent {
+                previous = current.clone();
+                previous_cost = current_cost;
+            }
         }
         Ok(())
     }
@@ -2288,6 +2410,35 @@ impl Database {
             )
             .map_err(|_| "unable to persist pending token measurement".to_string())?;
         Ok(())
+    }
+
+    fn unpriced_in_window(
+        connection: &Connection,
+        account: Option<&str>,
+        limit: Option<&str>,
+        start: i64,
+        end: i64,
+    ) -> Result<bool, String> {
+        connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM usage_events WHERE timestamp_ms > ?1 AND timestamp_ms <= ?2
+                AND account_key IS ?3 AND (quota_limit_id IS ?4 OR quota_limit_id IS NULL)
+                AND eligible=0)",
+            params![start, end, account, limit], |row| row.get(0),
+        ).map_err(|_| "unable to check pricing completeness".to_string())
+    }
+
+    fn has_unpriced_usage(
+        connection: &Connection,
+        group: &WindowGroup,
+        end: i64,
+    ) -> Result<bool, String> {
+        Self::unpriced_in_window(
+            connection,
+            group.account_key.as_deref(),
+            group.limit_id.as_deref(),
+            group.started_at_ms,
+            end,
+        )
     }
 
     fn cost_through(
@@ -2431,9 +2582,12 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT account_key, limit_id, observed_at_ms, used_percent, reset_at_ms, plan
-                 FROM quota_snapshots
-                 WHERE used_percent IS NOT NULL
-                 ORDER BY observed_at_ms DESC, id DESC LIMIT 1",
+                 FROM quota_snapshots AS quota
+                 WHERE used_percent IS NOT NULL AND EXISTS (
+                     SELECT 1 FROM epochs AS epoch WHERE epoch.account_key IS quota.account_key
+                       AND epoch.limit_id IS quota.limit_id AND epoch.ended_at_ms=quota.observed_at_ms
+                 )
+                 ORDER BY observed_at_ms DESC, used_percent DESC, COALESCE(reset_at_ms, -1) DESC, id DESC LIMIT 1",
                 [],
                 |row| {
                     Ok(LatestQuotaObservation {
@@ -2475,6 +2629,10 @@ impl Database {
     }
 
     pub fn latest_quote(&self) -> Result<Option<CurrentQuote>, String> {
+        self.quote_at(now_ms())
+    }
+
+    fn quote_at(&self, at: i64) -> Result<Option<CurrentQuote>, String> {
         let latest = self.latest_quota_observation()?;
         let points = self.stored_points()?;
         let Some(latest) = latest else {
@@ -2511,6 +2669,20 @@ impl Database {
             .transpose()?
             .map(|(start, reset, reason)| (Some(reason), Some(start), reset))
             .unwrap_or((None, None, latest.reset_at_ms));
+        let expired = reset_at.is_some_and(|reset| reset <= at);
+        let incomplete = window_start
+            .map(|start| {
+                Self::unpriced_in_window(
+                    &self.connection,
+                    latest.account_key.as_deref(),
+                    latest.limit_id.as_deref(),
+                    start,
+                    latest.observed_at_ms,
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
+        let current = current.filter(|_| !expired && !incomplete);
         let observed_cost = window_start
             .map(|start| self.sum_window_cost(start, latest.observed_at_ms, &latest))
             .transpose()?;
@@ -2578,8 +2750,14 @@ impl Database {
                 Confidence::None,
                 QuoteStatus::Pending,
                 Some(
-                    "Waiting for a positive weekly-usage change paired with local token cost."
-                        .into(),
+                    if expired {
+                        "Waiting for a quota observation from the new weekly window."
+                    } else if incomplete {
+                        "Waiting for prices for usage in this weekly window."
+                    } else {
+                        "Waiting for a positive weekly-usage change paired with local token cost."
+                    }
+                    .into(),
                 ),
             )
         };
@@ -2587,8 +2765,8 @@ impl Database {
             estimated_weekly_value_usd,
             change_value_usd,
             change_percent,
-            observed_cost_usd: observed_cost,
-            weekly_used_percent: Some(latest.used_percent),
+            observed_cost_usd: (!expired).then_some(observed_cost).flatten(),
+            weekly_used_percent: (!expired).then_some(latest.used_percent),
             reset_at,
             reset_reason,
             status,
@@ -2734,7 +2912,7 @@ impl Database {
                     && stored.point.timestamp == latest_timestamp
                     && stored.point.estimated_weekly_value_usd.is_none()
             });
-            if latest_active_graph_timestamp.map_or(true, |timestamp| timestamp < latest_timestamp)
+            if latest_active_graph_timestamp.is_none_or(|timestamp| timestamp < latest_timestamp)
                 && !has_pending_endpoint
             {
                 let (reset_at, reset_reason) = self
@@ -2911,26 +3089,72 @@ impl Database {
         Ok(())
     }
 
-    pub fn reset_all_data(&mut self) -> Result<(), String> {
-        let transaction = self
-            .connection
-            .transaction()
-            .map_err(|_| "unable to start data reset".to_string())?;
+    fn read_reset_cutoff(connection: &Connection) -> Result<Option<i64>, String> {
+        let saved: Option<String> = connection
+            .query_row(
+                "SELECT value FROM derived_state WHERE key='user_reset_cutoff'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "unable to read reset boundary".to_string())?;
+        if let Some(saved) = saved {
+            return Ok(saved.parse().ok());
+        }
+
+        // A legacy reset retained at most one pre-reset event as a quota baseline.
+        // Recover its boundary only when the checkpoint proves older events were cleared.
+        let has_old_checkpoint: bool = connection
+            .query_row(
+                "SELECT COUNT(*) = 2 FROM sqlite_master WHERE type='table'
+               AND name IN ('reset_checkpoint_meta', 'reset_checkpoint_usage_events')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| "unable to inspect legacy reset evidence".to_string())?;
+        if !has_old_checkpoint {
+            return Ok(None);
+        }
+        connection
+            .query_row(
+                "SELECT created_at_ms FROM reset_checkpoint_meta
+             WHERE (SELECT COUNT(*) FROM reset_checkpoint_usage_events
+                    WHERE timestamp_ms < created_at_ms) > 1
+               AND (SELECT COUNT(*) FROM usage_events WHERE timestamp_ms < created_at_ms) <= 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "unable to read legacy reset boundary".to_string())
+    }
+
+    fn write_reset_cutoff(
+        transaction: &Transaction<'_>,
+        cutoff: Option<i64>,
+    ) -> Result<(), String> {
+        let value = cutoff
+            .map(|timestamp| timestamp.to_string())
+            .unwrap_or_else(|| "none".into());
+        Self::set_derived_state(transaction, "user_reset_cutoff", &value)
+    }
+
+    fn prepare_reset(transaction: &Transaction<'_>) -> Result<(), String> {
         transaction
             .execute_batch(CREATE_RESET_CHECKPOINT_SQL)
             .map_err(|_| "unable to create the pre-reset checkpoint".to_string())?;
         transaction
-            .execute_batch(CLEAR_IMPORTED_DATA_SQL)
-            .map_err(|_| "unable to reset local data".to_string())?;
-        transaction
             .execute_batch(
-                "DELETE FROM annotations;
-                 DELETE FROM app_runs;",
+                "DROP TABLE IF EXISTS reset_checkpoint_cutoff;
+             CREATE TABLE reset_checkpoint_cutoff AS
+             SELECT value FROM derived_state WHERE key='user_reset_cutoff';
+             DELETE FROM annotations;
+             DELETE FROM app_runs;",
             )
-            .map_err(|_| "unable to reset local annotations".to_string())?;
-        transaction
-            .commit()
-            .map_err(|_| "unable to commit data reset".to_string())
+            .map_err(|_| "unable to reset local annotations".to_string())
+    }
+
+    pub fn reset_all_data(&mut self) -> Result<(), String> {
+        self.reset_with_baseline(&CollectionSummary::default(), now_ms())
     }
 
     pub fn restore_last_reset_checkpoint(&mut self) -> Result<(), String> {
@@ -2949,6 +3173,9 @@ impl Database {
             return Err("no reset checkpoint is available".into());
         }
 
+        let settings = self.load_settings()?;
+        let catalog = self.remote_pricing.clone();
+        let digest = pricing_configuration_digest(&settings, &catalog)?;
         let transaction = self
             .connection
             .transaction()
@@ -2959,6 +3186,29 @@ impl Database {
         transaction
             .execute_batch(RESTORE_RESET_CHECKPOINT_SQL)
             .map_err(|_| "the reset checkpoint is incompatible with this database".to_string())?;
+        let has_cutoff: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='reset_checkpoint_cutoff')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| "unable to inspect the reset checkpoint".to_string())?;
+        let cutoff = if has_cutoff {
+            transaction
+                .query_row(
+                    "SELECT CAST(value AS INTEGER) FROM reset_checkpoint_cutoff WHERE value <> 'none'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| "unable to restore the reset boundary".to_string())?
+        } else {
+            None
+        };
+        Self::write_reset_cutoff(&transaction, cutoff)?;
+        Self::reprice_usage_events(&transaction, &settings, &catalog, &digest)?;
+        Self::rebuild_quotes_in_transaction(&transaction)?;
+
         transaction
             .commit()
             .map_err(|_| "unable to commit checkpoint restore".to_string())
@@ -3523,7 +3773,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
             .expect("initial event count");
         let before_quote = database
-            .latest_quote()
+            .quote_at(i64::MIN)
             .expect("initial quote")
             .and_then(|quote| quote.estimated_weekly_value_usd);
 
@@ -3547,7 +3797,7 @@ mod tests {
             })
             .expect("checkpoint count after unchanged startup");
         let after_quote = database
-            .latest_quote()
+            .quote_at(i64::MIN)
             .expect("quote after unchanged startup")
             .and_then(|quote| quote.estimated_weekly_value_usd);
         assert_eq!(after_count, before_count);
@@ -3616,7 +3866,7 @@ mod tests {
             .connection
             .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
             .expect("event count after installed bundle change");
-        assert_eq!(imported_count, 3);
+        assert_eq!(imported_count, 2);
 
         drop(database);
         let _ = fs::remove_file(path);
@@ -3672,7 +3922,7 @@ mod tests {
         assert_eq!(after.2, PRICING_RULE_VERSION);
         assert_eq!(
             database
-                .latest_quote()
+                .quote_at(i64::MIN)
                 .expect("quote")
                 .expect("historical quote")
                 .estimated_weekly_value_usd,
@@ -4164,7 +4414,7 @@ mod tests {
             ],
         );
         let quote = database
-            .latest_quote()
+            .quote_at(i64::MIN)
             .expect("quote")
             .expect("current quote");
         assert_eq!(quote.estimated_weekly_value_usd, Some(73.5));
@@ -4209,12 +4459,12 @@ mod tests {
                 event(2_000, Some(0.42), 43.0, Some(10_000)),
             ],
         );
-        let quote_before_reset = database.latest_quote().expect("quote before reset");
+        let quote_before_reset = database.quote_at(i64::MIN).expect("quote before reset");
         assert!(quote_before_reset.is_some());
 
         database.reset_all_data().expect("reset with checkpoint");
         assert!(database
-            .latest_quote()
+            .quote_at(i64::MIN)
             .expect("quote after reset")
             .is_none());
 
@@ -4223,7 +4473,7 @@ mod tests {
             .expect("restore checkpoint");
         assert_eq!(
             database
-                .latest_quote()
+                .quote_at(i64::MIN)
                 .expect("restored quote")
                 .and_then(|quote| quote.estimated_weekly_value_usd),
             quote_before_reset.and_then(|quote| quote.estimated_weekly_value_usd)
@@ -4247,7 +4497,10 @@ mod tests {
         database
             .restore_last_reset_checkpoint()
             .expect("checkpoint survives full import clear");
-        assert!(database.latest_quote().expect("restored quote").is_some());
+        assert!(database
+            .quote_at(i64::MIN)
+            .expect("restored quote")
+            .is_some());
         drop(database);
         let _ = fs::remove_file(path);
     }
@@ -4360,7 +4613,7 @@ mod tests {
             ],
         );
         let quote = database
-            .latest_quote()
+            .quote_at(i64::MIN)
             .expect("quote")
             .expect("pending quote");
         assert_eq!(quote.status, QuoteStatus::Pending);
@@ -4398,9 +4651,9 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("priced events");
-        assert_eq!(priced, 2);
+        assert_eq!(priced, 1);
         let quote = database
-            .latest_quote()
+            .quote_at(i64::MIN)
             .expect("quote")
             .expect("current quote");
         assert_eq!(quote.estimated_weekly_value_usd, Some(40.0));
@@ -4638,9 +4891,9 @@ mod tests {
                     percentage_coverage, window_id
                  ) VALUES
                     (1000, 70, 70, 70, 'high', 'valid', 1,
-                     'nerftrack-token-api-equivalent-v5', 20, 1),
+                     'nerftrack-token-api-equivalent-v6', 20, 1),
                     (10000, 90, 90, 90, 'high', 'valid', 1,
-                     'nerftrack-token-api-equivalent-v5', 30, 1);",
+                     'nerftrack-token-api-equivalent-v6', 30, 1);",
             )
             .expect("same-window history");
 
@@ -4674,19 +4927,19 @@ mod tests {
                     confidence, status, is_finalized, algorithm_version,
                     percentage_coverage, window_id
                  ) VALUES (9000, 100, 100, 100, 'high', 'valid', 1,
-                    'nerftrack-token-api-equivalent-v5', 20, 1);",
+                    'nerftrack-token-api-equivalent-v6', 20, 1);",
             )
             .expect("live heartbeat fixture");
 
         database
-            .record_chart_heartbeat_at(20_000)
+            .record_chart_heartbeat_at(19_000)
             .expect("record heartbeat");
         let history = database.history(Range::D1).expect("history");
 
-        assert_eq!(history.statistics.available_end_timestamp, Some(20_000));
+        assert_eq!(history.statistics.available_end_timestamp, Some(19_000));
         assert_eq!(
             history.points.last().map(|point| point.timestamp),
-            Some(20_000)
+            Some(19_000)
         );
         assert!(history
             .points
@@ -4730,9 +4983,9 @@ mod tests {
                     percentage_coverage, window_id
                  ) VALUES
                     (9000, 100, 100, 100, 'high', 'valid', 1,
-                    'nerftrack-token-api-equivalent-v5', 20, 1),
+                    'nerftrack-token-api-equivalent-v6', 20, 1),
                     (19000, 29, 29, 29, 'low', 'valid', 1,
-                    'nerftrack-token-api-equivalent-v5', 3, 2);",
+                    'nerftrack-token-api-equivalent-v6', 3, 2);",
             )
             .expect("pending endpoint fixture");
 
@@ -4780,7 +5033,7 @@ mod tests {
                     id, limit_id, reset_at_ms, started_at_ms, ended_at_ms, reset_reason
                  ) VALUES
                     (1, 'codex', 9000, 0, 5000, 'scheduled_reset'),
-                    (2, 'codex', 999999999, 10000, 999999999, 'scheduled_reset');",
+                    (2, 'codex', 1209610000, 10000, 604810000, 'scheduled_reset');",
             )
             .expect("epochs");
         for (timestamp, value, window_id) in [(5_000, 130.0, 1), (latest_timestamp, 90.0, 2)] {
@@ -4892,7 +5145,7 @@ mod tests {
                 event(2_000, Some(0.42), 43.0, Some(10_000)),
             ],
         );
-        let before = database.latest_quote().expect("before").expect("quote");
+        let before = database.quote_at(i64::MIN).expect("before").expect("quote");
         drop(database);
         let mut reopened = Database {
             path: path.clone(),
@@ -4901,7 +5154,7 @@ mod tests {
         };
         reopened.migrate().expect("reopen schema");
         reopened.rebuild_quotes().expect("rebuild");
-        let after = reopened.latest_quote().expect("after").expect("quote");
+        let after = reopened.quote_at(i64::MIN).expect("after").expect("quote");
         assert_eq!(
             before.estimated_weekly_value_usd,
             after.estimated_weekly_value_usd
@@ -5004,7 +5257,7 @@ mod tests {
         persist(
             &mut database,
             vec![
-                event(1_000, Some(0.0), 42.0, Some(10_000)),
+                event(1_000, Some(0.1), 42.0, Some(10_000)),
                 event(2_000, Some(0.42), 43.0, Some(10_000)),
             ],
         );
@@ -5041,7 +5294,7 @@ mod tests {
         persist(
             &mut database,
             vec![
-                event(1_000, Some(0.0), 10.0, Some(100_000)),
+                event(1_000, Some(0.1), 10.0, Some(100_000)),
                 event(2_000, Some(0.4), 11.0, Some(100_000)),
             ],
         );
@@ -5105,3 +5358,7 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 }
+
+#[cfg(test)]
+#[path = "calculation_tests.rs"]
+mod calculation_tests;

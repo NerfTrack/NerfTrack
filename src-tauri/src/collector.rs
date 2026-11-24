@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use crate::parser::{
-    event_fingerprint, parse_newline_terminated_bytes_with_state, ParseStats, ParserState,
-    UsageEvent,
+    event_fingerprint, parse_legacy_jsonl_line, parse_newline_terminated_bytes_with_state,
+    ParseStats, ParserState, UsageEvent,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -27,6 +27,7 @@ pub struct PersistedCheckpoint {
 #[derive(Debug, Clone, Default)]
 pub struct CollectionSummary {
     pub events: Vec<UsageEvent>,
+    pub(crate) superseded_fingerprints: Vec<String>,
     pub checkpoints: Vec<SourceCheckpoint>,
     pub stats: ParseStats,
     pub interrupted_sources: Vec<String>,
@@ -99,6 +100,28 @@ fn has_complete_unterminated_record(bytes: &[u8]) -> bool {
         && serde_json::from_slice::<serde_json::Value>(tail).is_ok()
 }
 
+fn checkpoint_signature(file: &mut File, offset: u64) -> std::io::Result<String> {
+    let length = offset.min(4096) as usize;
+    let mut bytes = vec![0; length];
+    let mut digest = Sha256::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        digest.update(metadata.dev().to_le_bytes());
+        digest.update(metadata.ino().to_le_bytes());
+    }
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut bytes)?;
+    digest.update(&bytes);
+    if offset > length as u64 {
+        file.seek(SeekFrom::Start(offset - length as u64))?;
+        file.read_exact(&mut bytes)?;
+        digest.update(&bytes);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 pub fn scan_codex_home(
     home: &Path,
     previous: &HashMap<String, u64>,
@@ -122,6 +145,18 @@ pub fn scan_codex_home_with_state(
     home: &Path,
     previous: &HashMap<String, PersistedCheckpoint>,
 ) -> Result<CollectionSummary, String> {
+    scan_sources(home, previous, false)
+}
+
+pub(crate) fn scan_historical_codex_home(home: &Path) -> Result<CollectionSummary, String> {
+    scan_sources(home, &HashMap::new(), true)
+}
+
+fn scan_sources(
+    home: &Path,
+    previous: &HashMap<String, PersistedCheckpoint>,
+    reconcile_legacy_rows: bool,
+) -> Result<CollectionSummary, String> {
     let mut paths = Vec::new();
     let mut traversal = TraversalState::default();
     collect_jsonl_paths(home, &mut paths, &mut traversal)?;
@@ -131,6 +166,7 @@ pub fn scan_codex_home_with_state(
         ..CollectionSummary::default()
     };
     let mut seen = HashSet::new();
+    let mut legacy_fingerprints = HashSet::new();
     for path in paths {
         let key = source_key(&path);
         let metadata = match fs::metadata(&path) {
@@ -150,7 +186,7 @@ pub fn scan_codex_home_with_state(
                 serde_json::from_str::<ParserState>(&checkpoint.parser_state_json).ok()
             })
             .unwrap_or_default();
-        let offset = if requested_offset > size {
+        let mut offset = if requested_offset > size {
             // A rotated or truncated file must not reuse cumulative parser
             // state from bytes that no longer exist.
             parser_state = ParserState::default();
@@ -158,19 +194,33 @@ pub fn scan_codex_home_with_state(
         } else {
             requested_offset
         };
-        let file = match File::open(&path) {
+        let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(_) => {
                 summary.interrupted_sources.push(key);
                 continue;
             }
         };
-        let mut reader = BufReader::new(file);
-        if reader.seek(SeekFrom::Start(offset)).is_err() {
+        if let Some(signature) = parser_state.source_signature.as_ref() {
+            match checkpoint_signature(&mut file, offset) {
+                Ok(actual) if &actual == signature => {}
+                Ok(_) => {
+                    offset = 0;
+                    parser_state = ParserState::default();
+                }
+                Err(_) => {
+                    summary.interrupted_sources.push(key);
+                    continue;
+                }
+            }
+        }
+        if file.seek(SeekFrom::Start(offset)).is_err() {
             summary.interrupted_sources.push(key);
             continue;
         }
+        let mut reader = BufReader::new((&mut file).take(size - offset));
         let mut line = Vec::new();
+        let mut legacy_state = ParserState::default();
         let mut next_offset = offset;
         let mut read_failed = false;
         loop {
@@ -200,6 +250,12 @@ pub fn scan_codex_home_with_state(
                 // record from being stranded at the same checkpoint forever.
                 line.push(b'\n');
             }
+            if reconcile_legacy_rows {
+                let text = String::from_utf8_lossy(&line);
+                if let Some(event) = parse_legacy_jsonl_line(&text, &mut legacy_state) {
+                    legacy_fingerprints.insert(event_fingerprint(&event));
+                }
+            }
             let (events, stats) =
                 parse_newline_terminated_bytes_with_state(&line, &mut parser_state);
             summary.stats.imported_records += stats.imported_records;
@@ -216,12 +272,22 @@ pub fn scan_codex_home_with_state(
             summary.interrupted_sources.push(key);
             continue;
         }
+        match checkpoint_signature(&mut file, next_offset) {
+            Ok(signature) => parser_state.source_signature = Some(signature),
+            Err(_) => {
+                summary.interrupted_sources.push(key);
+                continue;
+            }
+        }
         summary.checkpoints.push(SourceCheckpoint {
             source_key: key,
             byte_offset: next_offset.min(size),
             source_active: is_active_source(&path),
             parser_state_json: serde_json::to_string(&parser_state).unwrap_or_else(|_| "{}".into()),
         });
+    }
+    if reconcile_legacy_rows {
+        summary.superseded_fingerprints = legacy_fingerprints.difference(&seen).cloned().collect();
     }
     Ok(summary)
 }
@@ -236,6 +302,37 @@ pub fn stats_add(left: &mut ParseStats, right: &ParseStats) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn resumes_a_same_size_replacement_from_the_beginning() {
+        let root = std::env::temp_dir().join(format!("nerftrack-rotation-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("session.jsonl");
+        let replacement = root.join("replacement");
+        let line = r#"{"request_id":"r1","timestamp":1735689600,"model":"gpt-5","usage":{"input_tokens":10}}"#;
+        fs::write(&source, format!("{line}\n")).unwrap();
+        let before = scan_codex_home_with_state(&root, &HashMap::new()).unwrap();
+        let previous = before
+            .checkpoints
+            .into_iter()
+            .map(|checkpoint| {
+                (
+                    checkpoint.source_key,
+                    PersistedCheckpoint {
+                        byte_offset: checkpoint.byte_offset,
+                        parser_state_json: checkpoint.parser_state_json,
+                    },
+                )
+            })
+            .collect();
+        fs::write(&replacement, format!("{}\n", line.replace("r1", "r2"))).unwrap();
+        fs::remove_file(&source).unwrap();
+        fs::rename(replacement, source).unwrap();
+        let after = scan_codex_home_with_state(&root, &previous).unwrap();
+        assert_eq!(after.events.len(), 1);
+        assert_eq!(after.events[0].request_id.as_deref(), Some("r2"));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn scans_with_byte_offsets_and_active_files_first() {

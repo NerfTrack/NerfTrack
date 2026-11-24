@@ -1,11 +1,11 @@
 [package]
 name = "nerftrack"
-version = "1.1.7"
+version = "1.1.8"
 description = "NerfTrack local Codex usage monitor"
 authors = ["NerfTrack"]
 license = "GPL-3.0-only"
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.89"
 default-run = "nerftrack"
 build = "build.rs"
 
@@ -26,7 +26,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

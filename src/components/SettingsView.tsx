@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { AppSettings, CustomPriceOverride } from '../domain';
 import { useI18n, type LocalePreference, type MessageKey } from '../i18n';
 import { Icon } from './Icons';
+import { ReleaseNotes } from './ReleaseNotes';
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -152,6 +153,7 @@ export function SettingsView({
         <h1>{t('settings.title')}</h1>
         <p>{t('settings.description')}</p>
       </header>
+      <ReleaseNotes />
       <div className="panel defaults-panel">
         <div>
           <span className="settings-kicker">{t('settings.language')}</span>
@@ -278,7 +280,7 @@ export function SettingsView({
         )}
         <div className="custom-price-grid" role="group" aria-label={t('settings.pricingGroup')}>
           {pricingDraft.map((price, index) => (
-            <div className="custom-price-row" key={`${price.modelId}-${index}`}>
+            <div className="custom-price-row" key={index}>
               <label>
                 {t('settings.modelId')}
                 <input

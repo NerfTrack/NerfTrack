@@ -38,7 +38,7 @@ does not use graph drops, token timing, TPS, the current `config.toml`, provider
 or authentication heuristics, or any other inferred signal for historical
 Fast-mode accounting.
 
-Each history point shows the unsmoothed cumulative cost-per-usage estimate for that observation. The headline remains the median of the latest seven valid cumulative estimates so short-lived noise does not redefine the current projection. Raw interval cost, percentage deltas, cumulative estimates, confidence, and coverage stay local for audit. Zero or negative cost movement, no percentage movement, unknown pricing, or a reset boundary is pending/rejected rather than converted into an estimate.
+History and the headline use the stabilized cumulative estimate. The headline remains the median of the latest seven valid cumulative estimates so short-lived noise does not redefine the current projection. Raw interval cost, percentage deltas, cumulative estimates, confidence, and coverage stay local for audit. Unknown prices block an estimate for the affected observation window. The estimator pairs cost increases with positive quota changes and measures confidence using coverage from paired intervals. It can accumulate priced activity across repeated readings with the same quota percentage.
 
 ## Pricing and overrides
 
@@ -97,7 +97,7 @@ a rate or sends model/token data to obtain one.
 
 ## Windows, reset safety, and migration
 
-Only 10,080-minute weekly limits are used. Windows are separated by account and limit ID. Reported reset timestamps within five minutes are treated as one reset identity so normal server jitter cannot fragment a weekly allowance. A larger reset-time change or an observed scheduled boundary starts a new window. A usage regression before the reported reset is retained in raw quota history but excluded from estimation as stale/out-of-order data. Event costs are attributed by the accepted epoch's time bounds rather than exact reset timestamp equality.
+Only 10,080-minute weekly limits are used. Windows are separated by limit ID and by account when account identity is present in the available logs. Reported reset timestamps within five minutes are treated as one reset identity so normal server jitter cannot fragment a weekly allowance. A new reset timestamp paired with a usage decrease or a crossed scheduled boundary starts a new window. An expired window awaits a fresh observation before showing a current estimate. A usage regression before the reported reset is retained in raw quota history but excluded from estimation as stale/out-of-order data. Event costs are attributed by the accepted epoch's time bounds rather than exact reset timestamp equality.
 
 Range changes are calculated only when both endpoints have medium or high confidence, the baseline lies inside the selected range, and it precedes the current estimate. Otherwise the comparison is unavailable rather than inferred from stale or low-coverage history.
 

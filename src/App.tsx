@@ -13,6 +13,8 @@ import { Icon } from './components/Icons';
 import { HistoryView } from './components/HistoryView';
 import { MetricCard, UsageRing } from './components/MetricCard';
 import { SetupView } from './components/SetupView';
+import { ReleaseNotes } from './components/ReleaseNotes';
+import { isTauri } from './lib/tauri';
 import { SettingsView } from './components/SettingsView';
 import { SideNav } from './components/SideNav';
 import { StarterPage } from './components/StarterPage';
@@ -502,6 +504,7 @@ export default function App() {
   const activeRange = useRef(range);
   const historyCache = useRef<Partial<Record<Range, HistoryResponse>>>({});
   const refreshInFlight = useRef(false);
+  const queuedRange = useRef<Range | null>(null);
   const [histories, setHistories] = useState<Partial<Record<Range, HistoryResponse>>>({});
   const history = histories[range] ?? null;
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -514,8 +517,11 @@ export default function App() {
   const [updateState, setUpdateState] = useState<UpdateState>(initialUpdateState);
   const updateInFlight = useRef(false);
 
-  const refresh = useCallback(async (requestedRange?: Range) => {
-    if (refreshInFlight.current) return;
+  const refresh = useCallback(async function refresh(requestedRange?: Range): Promise<void> {
+    if (refreshInFlight.current) {
+      if (requestedRange) queuedRange.current = requestedRange;
+      return;
+    }
     refreshInFlight.current = true;
     setIsRefreshing(true);
     try {
@@ -569,6 +575,10 @@ export default function App() {
       setIsLoading(false);
       setIsRefreshing(false);
       refreshInFlight.current = false;
+      const nextRange = queuedRange.current;
+      queuedRange.current = null;
+      if (nextRange && !historyCache.current[nextRange]) await refresh(nextRange);
+      else if (nextRange && nextRange !== requestedRange) await refresh(nextRange);
     }
   }, []);
 
@@ -831,6 +841,19 @@ export default function App() {
   const locale: Locale =
     displaySettings.locale === 'system' ? detectLocale() : displaySettings.locale;
 
+  const showReleaseNotes =
+    isTauri() && settings && settings.lastSeenReleaseNotesVersion !== CURRENT_APP_VERSION;
+  const dismissReleaseNotes = async () => {
+    if (!settings) return;
+    try {
+      setSettings(
+        await updateSettings({ ...settings, lastSeenReleaseNotesVersion: CURRENT_APP_VERSION }),
+      );
+    } catch {
+      setLoadError(true);
+    }
+  };
+
   const renderPage = () => {
     if (isLoading && !history)
       return (
@@ -938,6 +961,7 @@ export default function App() {
           onUpdate={() => void handleUpdate()}
         />
         <main className="app-content">
+          {showReleaseNotes && <ReleaseNotes onDismiss={() => void dismissReleaseNotes()} />}
           {status.state === 'recalibrating' && <LocalIndexingBanner />}
           {loadError && (
             <div className="global-error" role="alert">
