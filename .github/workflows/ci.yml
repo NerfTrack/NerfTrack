@@ -18,7 +18,7 @@ jobs:
       matrix:
         include:
           - name: macOS ARM64
-            os: macos-14
+            os: macos-15
             experimental: false
           - name: macOS Intel x86_64
             os: macos-15-intel
@@ -48,7 +48,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master, checked 2026-07-23
         with:
-          toolchain: stable
+          toolchain: 1.96.0
           components: rustfmt, clippy
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'

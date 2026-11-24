@@ -486,21 +486,20 @@ fn codex_file_name(path: &Path) -> bool {
         return false;
     };
     let name = name.to_ascii_lowercase();
-    if name == "codex" || name == "codex-cli" {
-        return true;
-    }
+    let bare_name = matches!(name.as_str(), "codex" | "codex-cli");
     #[cfg(windows)]
     {
-        windows_executable_extensions()
-            .iter()
-            .filter(|extension| !matches!(extension.as_str(), ".bat" | ".cmd"))
-            .any(|extension| {
-                name == format!("codex{extension}") || name == format!("codex-cli{extension}")
-            })
+        bare_name
+            || windows_executable_extensions()
+                .iter()
+                .filter(|extension| !matches!(extension.as_str(), ".bat" | ".cmd"))
+                .any(|extension| {
+                    name == format!("codex{extension}") || name == format!("codex-cli{extension}")
+                })
     }
     #[cfg(not(windows))]
     {
-        false
+        bare_name
     }
 }
 

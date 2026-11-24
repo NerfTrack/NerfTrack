@@ -27,7 +27,7 @@ jobs:
       matrix:
         include:
           - name: macOS ARM64
-            os: macos-14
+            os: macos-15
             platform: macos
             rust_target: aarch64-apple-darwin
             dmg_arch: aarch64
@@ -114,7 +114,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable, checked 2026-07-23
         with:
-          toolchain: stable
+          toolchain: 1.96.0
           target: ${{ matrix.rust_target }}
           components: rustfmt, clippy
 

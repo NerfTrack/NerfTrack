@@ -1089,15 +1089,14 @@ impl Database {
         settings: &AppSettings,
         pricing_state: &str,
     ) -> Result<bool, String> {
-        if self.load_derived_state("pricing")?.as_deref() != Some(pricing_state)
-            || self.load_derived_state("reconstruction")?.as_deref() != Some(RECONSTRUCTION_VERSION)
-            || self.load_derived_state("algorithm")?.as_deref() != Some(ALGORITHM_VERSION)
-            || self.load_derived_state("installation_marker")?.as_deref()
-                != Some(settings.installation_marker.as_str())
-        {
-            return Ok(true);
-        }
-        Ok(false)
+        Ok(
+            self.load_derived_state("pricing")?.as_deref() != Some(pricing_state)
+                || self.load_derived_state("reconstruction")?.as_deref()
+                    != Some(RECONSTRUCTION_VERSION)
+                || self.load_derived_state("algorithm")?.as_deref() != Some(ALGORITHM_VERSION)
+                || self.load_derived_state("installation_marker")?.as_deref()
+                    != Some(settings.installation_marker.as_str()),
+        )
     }
 
     fn column_exists(&self, table: &str, column: &str) -> Result<bool, String> {
